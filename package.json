@@ -1,0 +1,14 @@
+{
+  "name": "newsreel-whatsapp",
+  "version": "1.0.0",
+  "description": "Newsreel — Daily WhatsApp engagement (polls, quizzes, perspectives)",
+  "type": "module",
+  "scripts": {
+    "send": "node src/send.js",
+    "send:dry-run": "node src/send.js --dry-run",
+    "webhook": "node src/webhook.js"
+  },
+  "dependencies": {
+    "express": "^4.18.0"
+  }
+}
