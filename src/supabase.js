@@ -50,7 +50,7 @@ export async function addSubscriber(phone, firstName) {
 
 export async function removeSubscriber(phone) {
   const res = await fetch(
-    `${SUPABASE_URL}/rest/v1/whatsapp_subscribers?phone=eq.${normalizePhone(phone)}`,
+    `${SUPABASE_URL}/rest/v1/whatsapp_subscribers?phone=eq.${encodePhone(phone)}`,
     {
       method: 'PATCH',
       headers,
@@ -62,7 +62,7 @@ export async function removeSubscriber(phone) {
 
 export async function getSubscriberByPhone(phone) {
   const res = await fetch(
-    `${SUPABASE_URL}/rest/v1/whatsapp_subscribers?phone=eq.${normalizePhone(phone)}&limit=1`,
+    `${SUPABASE_URL}/rest/v1/whatsapp_subscribers?phone=eq.${encodePhone(phone)}&limit=1`,
     { headers }
   );
   if (!res.ok) return null;
@@ -103,6 +103,94 @@ export async function logPollResponse(phone, date, storyIdx, response) {
   return res.ok;
 }
 
+// ─── User takes (rebuttals to perspectives) ──
+
+/**
+ * Save a user's text rebuttal to a story perspective.
+ * These get surfaced anonymously to other users who voted differently.
+ */
+export async function saveUserTake(phone, date, storyIdx, text) {
+  const res = await fetch(
+    `${SUPABASE_URL}/rest/v1/user_takes`,
+    {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        phone: normalizePhone(phone),
+        date,
+        story_idx: storyIdx,
+        take_text: text.slice(0, 500), // cap length
+        created_at: new Date().toISOString(),
+      }),
+    }
+  );
+  if (!res.ok) console.error('Failed to save user take:', await res.text());
+  return res.ok;
+}
+
+/**
+ * Get best user takes from the opposite side for a given story.
+ * Used to surface anonymous quotes: "Someone who disagreed said..."
+ */
+export async function getUserTakes(date, storyIdx, limit = 3) {
+  const res = await fetch(
+    `${SUPABASE_URL}/rest/v1/user_takes?date=eq.${date}&story_idx=eq.${storyIdx}&order=created_at.desc&limit=${limit}`,
+    { headers }
+  );
+  if (!res.ok) return [];
+  return res.json();
+}
+
+// ─── Rebuttal state (tracks "Send my take" flow) ──
+
+/**
+ * Mark a user as awaiting a text rebuttal.
+ * When their next text message comes in, we capture it as a take.
+ */
+export async function logAwaitingRebuttal(phone, date, storyIdx) {
+  const res = await fetch(
+    `${SUPABASE_URL}/rest/v1/rebuttal_state`,
+    {
+      method: 'POST',
+      headers: { ...headers, 'Prefer': 'resolution=merge-duplicates' },
+      body: JSON.stringify({
+        phone: normalizePhone(phone),
+        date,
+        story_idx: storyIdx,
+        created_at: new Date().toISOString(),
+      }),
+    }
+  );
+  if (!res.ok) console.error('Failed to log rebuttal state:', await res.text());
+  return res.ok;
+}
+
+export async function getAwaitingRebuttal(phone) {
+  const res = await fetch(
+    `${SUPABASE_URL}/rest/v1/rebuttal_state?phone=eq.${encodePhone(phone)}&order=created_at.desc&limit=1`,
+    { headers }
+  );
+  if (!res.ok) return null;
+  const rows = await res.json();
+  if (!rows.length) return null;
+
+  // Only valid if created in the last hour (prevent stale state)
+  const created = new Date(rows[0].created_at);
+  const hourAgo = new Date(Date.now() - 60 * 60 * 1000);
+  return created > hourAgo ? rows[0] : null;
+}
+
+export async function clearAwaitingRebuttal(phone) {
+  const res = await fetch(
+    `${SUPABASE_URL}/rest/v1/rebuttal_state?phone=eq.${encodePhone(phone)}`,
+    {
+      method: 'DELETE',
+      headers,
+    }
+  );
+  return res.ok;
+}
+
 // ─── Helpers ────────────────────────────
 
 function normalizePhone(phone) {
@@ -111,4 +199,9 @@ function normalizePhone(phone) {
   return digits.startsWith('1') && digits.length === 11
     ? `+${digits}`
     : `+1${digits}`;
+}
+
+/** URL-encode phone for Supabase query params (+ must be %2B) */
+function encodePhone(phone) {
+  return encodeURIComponent(normalizePhone(phone));
 }

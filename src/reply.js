@@ -9,8 +9,9 @@
 import { loadEnv } from './env.js';
 loadEnv();
 
-import { getTodayPolls, logPollResponse, getSubscriberByPhone } from './supabase.js';
+import { getTodayPolls, logPollResponse, getSubscriberByPhone, logAwaitingRebuttal, getAwaitingRebuttal, clearAwaitingRebuttal, saveUserTake } from './supabase.js';
 import { sendTextReply, sendFollowUp } from './whatsapp.js';
+import { getStoryPerspectives, findContrastingVoice, formatPerspectiveMessage, findMultiplePerspectives, formatSpectrumMessage } from './perspectives.js';
 
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 const APP_URL = process.env.APP_URL || 'https://newsreel.co';
@@ -45,13 +46,42 @@ export async function handlePollResponse(phone, payload) {
   const reply = await generateReply(name, poll, stance);
   await sendTextReply(phone, reply);
 
-  // Follow up with story link + perspectives prompt
-  const storyUrl = `${APP_URL}/story/${date}/${storyIdx}`;
+  // Pull real perspectives from the perspectives database
+  // Match the poll's story to a perspectives story by headline similarity
+  const stories = await getStoryPerspectives(date);
+  const matchedStory = matchStoryToPoll(stories, poll);
+
+  if (matchedStory) {
+    // Send a real contrasting voice quote
+    const contrastVoice = findContrastingVoice(matchedStory, stance);
+    const perspMsg = formatPerspectiveMessage(contrastVoice, stance);
+
+    if (perspMsg) {
+      // Small delay so messages arrive in order
+      await new Promise(r => setTimeout(r, 1000));
+      await sendTextReply(phone, perspMsg);
+
+      // The critical thinking prompt — make them engage with the other side
+      await new Promise(r => setTimeout(r, 1500));
+      const voiceName = contrastVoice.voiceName.split(' ')[0]; // first name only
+      await sendFollowUp(phone,
+        `What would you say back to ${voiceName}?`,
+        [
+          { id: `rebut:${date}:${storyIdx}`, title: 'Send my take' },
+          { id: `perspectives:${date}:${storyIdx}`, title: 'See more takes' },
+          { id: `read:${date}:${storyIdx}`, title: 'Read the story' },
+        ]
+      );
+      return; // don't send the generic follow-up
+    }
+  }
+
+  // Fallback follow-up if no perspectives available
   await sendFollowUp(phone,
-    `Here's the full story if you want the details.`,
+    `Want to go deeper?`,
     [
       { id: `read:${date}:${storyIdx}`, title: 'Read the story' },
-      { id: `perspectives:${date}:${storyIdx}`, title: 'See other takes' },
+      { id: `perspectives:${date}:${storyIdx}`, title: 'See all perspectives' },
     ]
   );
 }
@@ -62,14 +92,7 @@ export async function handlePollResponse(phone, payload) {
 export async function handleTextReply(phone, text) {
   const cleaned = text.trim().toUpperCase();
 
-  // Check if it's a quiz answer (A, B, C, D)
-  if (['A', 'B', 'C', 'D'].includes(cleaned)) {
-    // TODO: match against active quiz for this user
-    await sendTextReply(phone, `Got it, ${cleaned}. Quiz scoring coming soon.`);
-    return;
-  }
-
-  // Check for opt-out
+  // Check for opt-out first
   if (['STOP', 'UNSUBSCRIBE', 'QUIT'].includes(cleaned)) {
     const { removeSubscriber } = await import('./supabase.js');
     await removeSubscriber(phone);
@@ -77,8 +100,25 @@ export async function handleTextReply(phone, text) {
     return;
   }
 
-  // General reply - keep it brief and human
-  await sendTextReply(phone, "Hey, I'm not great at open conversation yet, but I hear you. I'll have more for you tomorrow morning.");
+  // Check if it's a quiz answer (A, B, C, D)
+  if (['A', 'B', 'C', 'D'].includes(cleaned)) {
+    await sendTextReply(phone, `Got it, ${cleaned}. Quiz scoring coming soon.`);
+    return;
+  }
+
+  // Check if user is in "rebuttal mode" — they tapped "Send my take"
+  const pending = await getAwaitingRebuttal(phone);
+  if (pending) {
+    // Save their rebuttal
+    await saveUserTake(phone, pending.date, pending.story_idx, text.trim());
+    await clearAwaitingRebuttal(phone);
+
+    await sendTextReply(phone, "Logged. If it's one of the best takes we'll share it anonymously tomorrow. Real people's words hit different than AI summaries.");
+    return;
+  }
+
+  // General reply — but make it useful, not dismissive
+  await sendTextReply(phone, "Noted. I'll have today's poll for you tomorrow morning — that's when the real conversation starts.");
 }
 
 /**
@@ -88,12 +128,32 @@ export async function handleFollowUpButton(phone, buttonId) {
   const [action, date, storyIdxStr] = buttonId.split(':');
   const storyIdx = parseInt(storyIdxStr, 10);
 
+  if (action === 'rebut') {
+    // User tapped "Send my take" — prompt them to text their response
+    await sendTextReply(phone, 'Just type it out. One or two sentences, in your own words. Best ones get shared anonymously with other readers tomorrow.');
+    // Mark this user as "awaiting rebuttal" so we capture their next text
+    await logAwaitingRebuttal(phone, date, storyIdx);
+    return;
+  }
+
   if (action === 'read') {
     const storyUrl = `${APP_URL}/story/${date}/${storyIdx}`;
     await sendTextReply(phone, storyUrl);
   }
 
   if (action === 'perspectives') {
+    // Pull real perspectives and send a multi-voice spectrum
+    const stories = await getStoryPerspectives(date);
+    if (stories.length > storyIdx) {
+      const voices = findMultiplePerspectives(stories[storyIdx], null, 3);
+      const spectrumMsg = formatSpectrumMessage(voices);
+      if (spectrumMsg) {
+        await sendTextReply(phone, spectrumMsg);
+        return;
+      }
+    }
+
+    // Fallback to link if perspectives unavailable
     const perspUrl = `${APP_URL}/perspectives/${date}/${storyIdx}`;
     await sendTextReply(phone, `${perspUrl}\n\nSee how creators, journalists, and politicians are framing this differently.`);
   }
@@ -157,6 +217,34 @@ Write a WhatsApp reply (2-3 sentences max). Rules:
     console.error('Claude reply failed:', err.message);
     return getFallbackReply(name, poll, stance);
   }
+}
+
+/**
+ * Match a perspectives story to a poll by headline keyword overlap.
+ * The poll has a headline from the newsletter, the perspectives API
+ * has headlines from the voice-clustering pipeline — they may not
+ * match exactly, so we do fuzzy keyword matching.
+ */
+function matchStoryToPoll(stories, poll) {
+  if (!stories?.length || !poll?.headline) return null;
+
+  const pollWords = poll.headline.toLowerCase().split(/\s+/)
+    .filter(w => w.length > 3); // skip small words
+
+  let bestMatch = null;
+  let bestScore = 0;
+
+  for (const story of stories) {
+    const storyHeadline = (story.headline || '').toLowerCase();
+    const score = pollWords.filter(w => storyHeadline.includes(w)).length;
+    if (score > bestScore) {
+      bestScore = score;
+      bestMatch = story;
+    }
+  }
+
+  // Require at least 2 keyword matches to avoid false positives
+  return bestScore >= 2 ? bestMatch : stories[0];
 }
 
 function getFallbackReply(name, poll, stance) {
