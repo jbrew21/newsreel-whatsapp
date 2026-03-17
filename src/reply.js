@@ -100,6 +100,27 @@ export async function handleTextReply(phone, text) {
     return;
   }
 
+  // Check if it's a poll vote via text reply to template
+  const stanceMap = {
+    'STRONGLY AGREE': 'strongly_agree',
+    'AGREE': 'agree',
+    'NEUTRAL': 'neutral',
+    'DISAGREE': 'disagree',
+    'STRONGLY DISAGREE': 'strongly_disagree',
+  };
+  if (stanceMap[cleaned]) {
+    // Find today's lead poll and treat this as a vote
+    const today = new Date().toISOString().split('T')[0];
+    const polls = await getTodayPolls(today);
+    if (polls.length) {
+      // Pick story_idx 0 as the lead (same as what send.js picks)
+      const poll = polls.reduce((best, p) => (!best || p.story_idx < best.story_idx) ? p : best, null);
+      const payload = `poll:${today}:${poll.story_idx}:${stanceMap[cleaned]}`;
+      await handlePollResponse(phone, payload);
+      return;
+    }
+  }
+
   // Check if it's a quiz answer (A, B, C, D)
   if (['A', 'B', 'C', 'D'].includes(cleaned)) {
     await sendTextReply(phone, `Got it, ${cleaned}. Quiz scoring coming soon.`);

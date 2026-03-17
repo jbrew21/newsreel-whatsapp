@@ -26,30 +26,28 @@ const authHeaders = {
  * Template: "daily_nudge" — just opens the conversation
  * List message: full poll with Strongly Agree → Strongly Disagree
  */
-export async function sendDailyPoll(phone, firstName, pollStatement, storyIdx, date) {
-  // Step 1: Send template to open 24h window
-  const templateResult = await sendMessage({
+export async function sendDailyPoll(phone, firstName, pollStatement, storyIdx, date, headline) {
+  // Send template with all 3 params: name, headline context, poll statement
+  // Template body: "Hey {{1}}, {{2}} \n\nWhat's your stance?\n\n\"{{3}}\"\n\nStrongly agree...?"
+  return sendMessage({
     messaging_product: 'whatsapp',
     to: phone,
     type: 'template',
     template: {
       name: 'daily_nudge',
-      language: { code: 'en_US' },
+      language: { code: 'en' },
       components: [
         {
           type: 'body',
           parameters: [
             { type: 'text', text: firstName || 'there' },
+            { type: 'text', text: headline || 'here\'s today\'s story.' },
+            { type: 'text', text: pollStatement },
           ],
         },
       ],
     },
   });
-
-  if (!templateResult.ok) return templateResult;
-
-  // Step 2: Send the actual poll as an interactive list (5 options)
-  return sendPollList(phone, pollStatement, storyIdx, date);
 }
 
 /**

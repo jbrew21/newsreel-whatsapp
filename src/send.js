@@ -123,7 +123,8 @@ async function main() {
       sub.first_name,
       poll.question,
       poll.story_idx,
-      today
+      today,
+      poll.headline
     );
 
     if (result.ok) {
