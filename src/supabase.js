@@ -85,17 +85,15 @@ export async function getTodayPolls(date) {
 
 export async function logPollResponse(phone, date, storyIdx, response) {
   const res = await fetch(
-    `${SUPABASE_URL}/rest/v1/poll_responses`,
+    `${SUPABASE_URL}/rest/v1/whatsapp_poll_responses`,
     {
       method: 'POST',
-      headers: { ...headers, 'Prefer': 'resolution=merge-duplicates' },
+      headers,
       body: JSON.stringify({
         phone: normalizePhone(phone),
         date,
         story_idx: storyIdx,
         response,
-        platform: 'whatsapp',
-        responded_at: new Date().toISOString(),
       }),
     }
   );
@@ -199,7 +197,7 @@ export async function clearAwaitingRebuttal(phone) {
  */
 export async function getUserPollHistory(phone, limit = 20) {
   const res = await fetch(
-    `${SUPABASE_URL}/rest/v1/poll_responses?phone=eq.${encodePhone(phone)}&platform=eq.whatsapp&order=responded_at.desc&limit=${limit}&select=date,story_idx,response,responded_at`,
+    `${SUPABASE_URL}/rest/v1/whatsapp_poll_responses?phone=eq.${encodePhone(phone)}&order=created_at.desc&limit=${limit}&select=date,story_idx,response,created_at`,
     { headers }
   );
   if (!res.ok) return [];
