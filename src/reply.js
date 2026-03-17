@@ -157,10 +157,13 @@ export async function handleFollowUpButton(phone, buttonId) {
   }
 
   if (action === 'perspectives') {
-    // Pull real perspectives and send a multi-voice spectrum
+    // Pull real perspectives and match to the correct story
     const stories = await getStoryPerspectives(date);
-    if (stories.length > storyIdx) {
-      const voices = findMultiplePerspectives(stories[storyIdx], null, 3);
+    const polls = await getTodayPolls(date);
+    const poll = polls.find(p => p.story_idx === storyIdx);
+    const matched = poll ? matchStoryToPoll(stories, poll) : null;
+    if (matched) {
+      const voices = findMultiplePerspectives(matched, null, 3);
       const spectrumMsg = formatSpectrumMessage(voices);
       if (spectrumMsg) {
         await sendTextReply(phone, spectrumMsg);
@@ -455,15 +458,17 @@ function matchStoryToPoll(stories, poll) {
     }
   }
 
-  // Require at least 2 keyword matches to avoid false positives
-  return bestScore >= 2 ? bestMatch : stories[0];
+  // Require at least 2 keyword matches to avoid sending wrong story's perspectives
+  return bestScore >= 2 ? bestMatch : null;
 }
 
 function getFallbackReply(name, poll, stance) {
   const takes = {
+    strongly_agree: poll.ai_take_agree,
     agree: poll.ai_take_agree,
     neutral: poll.ai_take_neutral,
     disagree: poll.ai_take_disagree,
+    strongly_disagree: poll.ai_take_disagree,
   };
 
   const take = takes[stance] || takes.neutral;

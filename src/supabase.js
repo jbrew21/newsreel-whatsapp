@@ -174,10 +174,10 @@ export async function getAwaitingRebuttal(phone) {
   const rows = await res.json();
   if (!rows.length) return null;
 
-  // Only valid if created in the last hour (prevent stale state)
+  // Only valid if created in the last 4 hours (give commuters time to reply)
   const created = new Date(rows[0].created_at);
-  const hourAgo = new Date(Date.now() - 60 * 60 * 1000);
-  return created > hourAgo ? rows[0] : null;
+  const fourHoursAgo = new Date(Date.now() - 4 * 60 * 60 * 1000);
+  return created > fourHoursAgo ? rows[0] : null;
 }
 
 export async function clearAwaitingRebuttal(phone) {
