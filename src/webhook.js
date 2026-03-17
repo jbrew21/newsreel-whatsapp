@@ -15,7 +15,7 @@ import { loadEnv } from './env.js';
 loadEnv();
 
 import express from 'express';
-import { handlePollResponse, handleTextReply, handleFollowUpButton } from './reply.js';
+import { handlePollResponse, handleTextReply, handleFollowUpButton, handleForwardButton, handleProfileButton } from './reply.js';
 
 const app = express();
 app.use(express.json());
@@ -83,6 +83,10 @@ app.post('/webhook', async (req, res) => {
           console.log(`  Button: ${buttonId}`);
           if (buttonId.startsWith('poll:')) {
             await handlePollResponse(phone, buttonId);
+          } else if (buttonId.startsWith('forward:') || buttonId.startsWith('skip_forward:')) {
+            await handleForwardButton(phone, buttonId);
+          } else if (buttonId.startsWith('profile:') || buttonId.startsWith('skip_profile:')) {
+            await handleProfileButton(phone, buttonId);
           } else {
             await handleFollowUpButton(phone, buttonId);
           }

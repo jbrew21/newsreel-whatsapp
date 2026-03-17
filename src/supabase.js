@@ -191,6 +191,39 @@ export async function clearAwaitingRebuttal(phone) {
   return res.ok;
 }
 
+// ─── User poll history (for profile insights) ──
+
+/**
+ * Get a user's recent poll responses for profile generation.
+ * Returns array of { date, story_idx, response, responded_at }
+ */
+export async function getUserPollHistory(phone, limit = 20) {
+  const res = await fetch(
+    `${SUPABASE_URL}/rest/v1/poll_responses?phone=eq.${encodePhone(phone)}&platform=eq.whatsapp&order=responded_at.desc&limit=${limit}&select=date,story_idx,response,responded_at`,
+    { headers }
+  );
+  if (!res.ok) return [];
+  return res.json();
+}
+
+/**
+ * Get poll questions for a set of date+story_idx pairs.
+ * Used to enrich profile insights with the actual poll topics.
+ */
+export async function getPollsByDateAndIdx(pairs) {
+  if (!pairs.length) return [];
+
+  // Fetch all daily_polls for relevant dates
+  const dates = [...new Set(pairs.map(p => p.date))];
+  const dateFilter = dates.map(d => `date.eq.${d}`).join(',');
+  const res = await fetch(
+    `${SUPABASE_URL}/rest/v1/daily_polls?or=(${dateFilter})&select=date,story_idx,question,headline`,
+    { headers }
+  );
+  if (!res.ok) return [];
+  return res.json();
+}
+
 // ─── Helpers ────────────────────────────
 
 function normalizePhone(phone) {

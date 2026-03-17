@@ -9,7 +9,7 @@
 import { loadEnv } from './env.js';
 loadEnv();
 
-import { getTodayPolls, logPollResponse, getSubscriberByPhone, logAwaitingRebuttal, getAwaitingRebuttal, clearAwaitingRebuttal, saveUserTake } from './supabase.js';
+import { getTodayPolls, logPollResponse, getSubscriberByPhone, logAwaitingRebuttal, getAwaitingRebuttal, clearAwaitingRebuttal, saveUserTake, getUserPollHistory, getPollsByDateAndIdx } from './supabase.js';
 import { sendTextReply, sendFollowUp } from './whatsapp.js';
 import { getStoryPerspectives, findContrastingVoice, formatPerspectiveMessage, findMultiplePerspectives, formatSpectrumMessage } from './perspectives.js';
 
@@ -114,6 +114,10 @@ export async function handleTextReply(phone, text) {
     await clearAwaitingRebuttal(phone);
 
     await sendTextReply(phone, "Logged. If it's one of the best takes we'll share it anonymously tomorrow. Real people's words hit different than AI summaries.");
+
+    // Trigger the forward prompt after a short delay
+    await new Promise(r => setTimeout(r, 1500));
+    await sendForwardPrompt(phone, pending.date, pending.story_idx);
     return;
   }
 
@@ -139,6 +143,17 @@ export async function handleFollowUpButton(phone, buttonId) {
   if (action === 'read') {
     const storyUrl = `${APP_URL}/story/${date}/${storyIdx}`;
     await sendTextReply(phone, storyUrl);
+
+    // After reading, offer the forward prompt
+    await new Promise(r => setTimeout(r, 1500));
+    await sendFollowUp(phone,
+      'Think someone you know would have a strong take on this? Forward this poll to them.',
+      [
+        { id: `forward:${date}:${storyIdx}`, title: 'Forward this' },
+        { id: `skip_forward:${date}:${storyIdx}`, title: "I'm good" },
+      ]
+    );
+    return;
   }
 
   if (action === 'perspectives') {
@@ -149,6 +164,16 @@ export async function handleFollowUpButton(phone, buttonId) {
       const spectrumMsg = formatSpectrumMessage(voices);
       if (spectrumMsg) {
         await sendTextReply(phone, spectrumMsg);
+
+        // After perspectives, offer the forward prompt
+        await new Promise(r => setTimeout(r, 1500));
+        await sendFollowUp(phone,
+          'Think someone you know would have a strong take on this? Forward this poll to them.',
+          [
+            { id: `forward:${date}:${storyIdx}`, title: 'Forward this' },
+            { id: `skip_forward:${date}:${storyIdx}`, title: "I'm good" },
+          ]
+        );
         return;
       }
     }
@@ -156,6 +181,193 @@ export async function handleFollowUpButton(phone, buttonId) {
     // Fallback to link if perspectives unavailable
     const perspUrl = `${APP_URL}/perspectives/${date}/${storyIdx}`;
     await sendTextReply(phone, `${perspUrl}\n\nSee how creators, journalists, and politicians are framing this differently.`);
+
+    await new Promise(r => setTimeout(r, 1500));
+    await sendFollowUp(phone,
+      'Think someone you know would have a strong take on this? Forward this poll to them.',
+      [
+        { id: `forward:${date}:${storyIdx}`, title: 'Forward this' },
+        { id: `skip_forward:${date}:${storyIdx}`, title: "I'm good" },
+      ]
+    );
+    return;
+  }
+}
+
+/**
+ * Handle the "Forward this" / "I'm good" prompt
+ */
+export async function handleForwardButton(phone, buttonId) {
+  const [action, date, storyIdxStr] = buttonId.split(':');
+  const storyIdx = parseInt(storyIdxStr, 10);
+
+  if (action === 'forward') {
+    // Send a shareable text block they can copy/forward
+    const polls = await getTodayPolls(date);
+    const poll = polls.find(p => p.story_idx === storyIdx);
+    const question = poll?.question || 'Today\'s Newsreel poll';
+    const headline = poll?.headline || '';
+
+    const shareText = [
+      `*${headline}*`,
+      ``,
+      `"${question}"`,
+      ``,
+      `Vote and see what real people think.`,
+      `Text JOIN to +1 (203) 733-0151 to get tomorrow's poll.`,
+      ``,
+      `— Newsreel`,
+    ].join('\n');
+
+    await sendTextReply(phone, shareText);
+    await new Promise(r => setTimeout(r, 1000));
+    await sendTextReply(phone, 'Just forward that message to whoever you think would have a strong take.');
+
+    // After forward, show the profile prompt
+    await new Promise(r => setTimeout(r, 1500));
+    await sendProfilePrompt(phone, date, storyIdx);
+    return;
+  }
+
+  if (action === 'skip_forward') {
+    // Skip forward, go straight to profile prompt
+    await sendProfilePrompt(phone, date, storyIdx);
+    return;
+  }
+}
+
+/**
+ * Handle the "See my profile" / "Maybe later" prompt
+ */
+export async function handleProfileButton(phone, buttonId) {
+  const [action, date, storyIdxStr] = buttonId.split(':');
+
+  if (action === 'profile') {
+    // Generate and send their Newsreel profile
+    const insight = await generateProfileInsight(phone);
+    await sendTextReply(phone, insight);
+    await new Promise(r => setTimeout(r, 1000));
+    await sendTextReply(phone, "See you tomorrow morning with a new story. Stay sharp.");
+    return;
+  }
+
+  if (action === 'skip_profile') {
+    await sendTextReply(phone, "No worries. See you tomorrow morning.");
+    return;
+  }
+}
+
+/**
+ * Send the "Forward to friends" prompt
+ */
+async function sendForwardPrompt(phone, date, storyIdx) {
+  await sendFollowUp(phone,
+    'Think someone you know would have a strong take on this? Forward this poll to them.',
+    [
+      { id: `forward:${date}:${storyIdx}`, title: 'Forward this' },
+      { id: `skip_forward:${date}:${storyIdx}`, title: "I'm good" },
+    ]
+  );
+}
+
+/**
+ * Send the "See your Newsreel profile" prompt
+ */
+async function sendProfilePrompt(phone, date, storyIdx) {
+  await sendFollowUp(phone,
+    'Want to see where you stand? Based on your votes, here\'s your Newsreel profile.',
+    [
+      { id: `profile:${date}:${storyIdx}`, title: 'See my profile' },
+      { id: `skip_profile:${date}:${storyIdx}`, title: 'Maybe later' },
+    ]
+  );
+}
+
+/**
+ * Generate a profile insight from the user's voting history using Claude
+ */
+async function generateProfileInsight(phone) {
+  const history = await getUserPollHistory(phone, 20);
+
+  if (!history.length) {
+    return "You haven't voted on enough polls yet for a profile. Keep going and check back after a few more.";
+  }
+
+  // Enrich with poll questions
+  const pairs = history.map(h => ({ date: h.date, story_idx: h.story_idx }));
+  const pollData = await getPollsByDateAndIdx(pairs);
+
+  // Build a map for quick lookup
+  const pollMap = {};
+  for (const p of pollData) {
+    pollMap[`${p.date}:${p.story_idx}`] = p;
+  }
+
+  // Count patterns
+  const total = history.length;
+  const counts = { strongly_agree: 0, agree: 0, neutral: 0, disagree: 0, strongly_disagree: 0 };
+  for (const h of history) {
+    if (counts[h.response] !== undefined) counts[h.response]++;
+  }
+
+  const agreeTotal = counts.strongly_agree + counts.agree;
+  const disagreeTotal = counts.strongly_disagree + counts.disagree;
+
+  // Build context for Claude
+  const voteSummary = history.slice(0, 10).map(h => {
+    const poll = pollMap[`${h.date}:${h.story_idx}`];
+    return `- "${poll?.question || 'Unknown poll'}" → ${h.response.replace('_', ' ')}`;
+  }).join('\n');
+
+  if (!ANTHROPIC_API_KEY) {
+    // Fallback without Claude
+    const agreePercent = Math.round((agreeTotal / total) * 100);
+    const disagreePercent = Math.round((disagreeTotal / total) * 100);
+    return `*Your Newsreel Profile*\n\nYou've voted on ${total} poll${total === 1 ? '' : 's'}.\n\nAgreed: ${agreePercent}%\nDisagreed: ${disagreePercent}%\nNeutral: ${Math.round((counts.neutral / total) * 100)}%\n\nYou ${agreeTotal > disagreeTotal ? 'tend to agree with the framing of our poll questions' : disagreeTotal > agreeTotal ? 'tend to push back against the framing' : 'split pretty evenly'}.`;
+  }
+
+  const prompt = `You're Newsreel, generating a brief WhatsApp profile insight for a user based on their poll voting history.
+
+Here are their recent votes:
+${voteSummary}
+
+Stats: ${total} total votes. Agreed ${agreeTotal} times, disagreed ${disagreeTotal} times, neutral ${counts.neutral} times.
+
+Write a 3-4 sentence WhatsApp-style profile insight. Rules:
+- Start with "*Your Newsreel Profile*" (WhatsApp bold)
+- Include their vote count
+- Note any patterns (do they lean agree or disagree? Are they contrarian or consensus-driven?)
+- If possible, note what topics they seem most opinionated on
+- Tone: direct, smart, like a friend who actually pays attention
+- NEVER use em dashes, emojis, or exclamation marks
+- NEVER be patronizing or say "great" or "interesting"
+- Keep it under 400 characters total`;
+
+  try {
+    const res = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'x-api-key': ANTHROPIC_API_KEY,
+        'anthropic-version': '2023-06-01',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-20250514',
+        max_tokens: 200,
+        messages: [{ role: 'user', content: prompt }],
+      }),
+    });
+
+    if (!res.ok) {
+      console.error('Claude profile API error:', await res.text());
+      return `*Your Newsreel Profile*\n\n${total} polls voted on. You ${agreeTotal > disagreeTotal ? 'lean toward agreement' : 'tend to push back'}. More votes, sharper profile.`;
+    }
+
+    const data = await res.json();
+    return data.content[0].text;
+  } catch (err) {
+    console.error('Claude profile failed:', err.message);
+    return `*Your Newsreel Profile*\n\n${total} polls voted on. You ${agreeTotal > disagreeTotal ? 'lean toward agreement' : 'tend to push back'}. More votes, sharper profile.`;
   }
 }
 

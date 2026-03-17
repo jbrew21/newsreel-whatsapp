@@ -4,12 +4,14 @@
  * Newsreel WhatsApp — Daily sender
  *
  * Pulls today's top poll from daily_polls (already populated by newsletter),
- * sends it to all active WhatsApp subscribers via template message.
+ * picks the most polarizing story as the lead, and sends it to all active
+ * WhatsApp subscribers via template message.
  *
  * Usage:
- *   node src/send.js              # Send today's poll
- *   node src/send.js --dry-run    # Preview without sending
- *   node src/send.js --date 2026-03-13   # Specific date
+ *   node src/send.js                     # Send today's poll
+ *   node src/send.js 2026-03-17          # Specific date (positional arg)
+ *   node src/send.js --dry-run           # Preview without sending
+ *   node src/send.js --date 2026-03-17   # Specific date (flag)
  */
 
 import { loadEnv } from './env.js';
@@ -21,9 +23,56 @@ import { sendDailyPoll } from './whatsapp.js';
 const args = process.argv.slice(2);
 const DRY_RUN = args.includes('--dry-run');
 const dateFlag = args.indexOf('--date');
+
+// Support positional date arg: node src/send.js 2026-03-17
+const positionalDate = args.find(a => /^\d{4}-\d{2}-\d{2}$/.test(a));
 const today = dateFlag >= 0
   ? args[dateFlag + 1]
-  : new Date().toISOString().split('T')[0];
+  : positionalDate || new Date().toISOString().split('T')[0];
+
+/**
+ * Pick the most engaging/polarizing poll to lead with.
+ * Scoring heuristics:
+ *   - story_idx 0 gets a small bonus (editorial intent)
+ *   - Questions with strong opinion words score higher
+ *   - "Should" questions tend to be more engaging
+ *   - Shorter, punchier questions score higher
+ */
+function pickLeadPoll(polls) {
+  if (polls.length === 1) return polls[0];
+
+  const polarizingWords = [
+    'should', 'ban', 'deactivate', 'allow', 'force', 'require', 'punish',
+    'accused', 'guilty', 'wrong', 'right', 'fair', 'unfair', 'dangerous',
+    'racist', 'sexist', 'discrimination', 'freedom', 'censorship', 'war',
+    'kill', 'death', 'crime', 'controversial', 'radical', 'extreme',
+  ];
+
+  const scored = polls.map(poll => {
+    let score = 0;
+    const q = (poll.question || '').toLowerCase();
+
+    // Polarizing keyword bonus
+    for (const word of polarizingWords) {
+      if (q.includes(word)) score += 2;
+    }
+
+    // "Should" questions drive engagement
+    if (q.startsWith('universities') || q.includes('should')) score += 3;
+
+    // Shorter questions are punchier (sweet spot: 40-100 chars)
+    if (q.length >= 40 && q.length <= 100) score += 2;
+    if (q.length > 150) score -= 1;
+
+    // Editorial lead bonus (story_idx 0 was chosen by the newsletter pipeline)
+    if (poll.story_idx === 0) score += 2;
+
+    return { poll, score };
+  });
+
+  scored.sort((a, b) => b.score - a.score);
+  return scored[0].poll;
+}
 
 async function main() {
   console.log(`\nNewsreel WhatsApp — ${today}${DRY_RUN ? ' [DRY RUN]' : ''}\n`);
@@ -35,9 +84,14 @@ async function main() {
     process.exit(1);
   }
 
-  // Pick the lead story poll (story_idx 0)
-  const poll = polls[0];
-  console.log(`Poll: "${poll.question}"`);
+  console.log(`Found ${polls.length} polls for ${today}:`);
+  for (const p of polls) {
+    console.log(`  [${p.story_idx}] ${p.question}`);
+  }
+
+  // Pick the most engaging poll as lead
+  const poll = pickLeadPoll(polls);
+  console.log(`\nLead poll: "${poll.question}"`);
   console.log(`Story: ${poll.headline}\n`);
 
   // 2. Get subscribers
@@ -47,6 +101,15 @@ async function main() {
   if (!subscribers.length) {
     console.log('No active subscribers. Add some first:');
     console.log('  node src/manage.js add +1234567890 "Jack"');
+    process.exit(0);
+  }
+
+  if (DRY_RUN) {
+    console.log('[DRY RUN] Would send to:');
+    for (const sub of subscribers) {
+      console.log(`  ${sub.first_name || sub.phone}`);
+    }
+    console.log('\nDone (dry run, nothing sent).');
     process.exit(0);
   }
 
@@ -68,11 +131,11 @@ async function main() {
       console.log(`  Sent to ${sub.first_name || sub.phone}`);
     } else {
       failed++;
-      console.error(`  Failed: ${sub.phone}`);
+      console.error(`  Failed: ${sub.phone} — ${JSON.stringify(result.error || {})}`);
     }
 
     // Rate limit: 80 msgs/sec for WhatsApp Business API, but be conservative
-    if (!DRY_RUN && subscribers.length > 10) {
+    if (subscribers.length > 10) {
       await new Promise(r => setTimeout(r, 100));
     }
   }
